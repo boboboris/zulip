@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>APIC Cockpit Réseau</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: #f7f8fa; }
+    .card { border-radius: 10px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace; }
+    .small-label { font-size: .85rem; color: #6b7280; }
+    .tab-pane { margin-top: 10px; }
+    .pill { padding:2px 8px; border-radius: 20px; font-size: 12px; }
+    .pill-bgp { background:#e7f3ff; color:#0b5ed7; border:1px solid #b3d4ff; }
+    .pill-static { background:#fff4e5; color:#b35c00; border:1px solid #ffd199; }
+    .pill-connected { background:#e8f5e9; color:#1b5e20; border:1px solid #c8e6c9; }
+    .table thead th { position: sticky; top: 0; background: white; z-index: 1; }
+  </style>
+</head>
+<body>
+<div class="container py-4">
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h3 class="m-0">APIC Cockpit Réseau</h3>
+    <div class="d-flex align-items-center gap-2">
+      <span class="small-label">Préfixes uniques:</span><span id="uniqueCount" class="badge bg-secondary">—</span>
+      <span class="small-label">Routes:</span><span id="rowCount" class="badge bg-secondary">—</span>
+      <a href="{{ url_for('home') }}" class="btn btn-outline-secondary btn-sm">← Retour</a>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label">Pod(s)</label>
+          <select class="form-select" id="pods" multiple>
+            {% for pid, info in apics.items() %}
+            <option value="{{ pid }}">{{ info.name }} ({{ pid }})</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">VRF (Tenant:VRF)</label>
+          <input id="vrfDn" class="form-control" value="SLF-DEFAULT:SLF-DEFAULT_VRF">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Auth mode</label>
+          <select id="authMode" class="form-select">
+            <option value="local">Local</option>
+            <option value="tacacs">TACACS / Remote</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Identifiants</label>
+          <div class="input-group">
+            <input id="username" class="form-control" placeholder="Utilisateur">
+            <input id="password" type="password" class="form-control" placeholder="Mot de passe" autocomplete="current-password">
+          </div>
+        </div>
+
+        <div class="col-md-12 d-flex align-items-center gap-2">
+          <button id="btnConnect" class="btn btn-success">Connecter</button>
+          <button id="btnReconnect" class="btn btn-outline-primary" disabled>Rafraîchir</button>
+          <span id="connBadge" class="badge bg-secondary">Not connected</span>
+          <span id="errors" class="text-danger small"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <ul class="nav nav-pills mb-3" role="tablist">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#tab-routes" type="button">Check routage</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#tab-fabric" type="button">Leaf / Spine</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#tab-vlans" type="button">Tables VLANs</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#tab-pathlogs" type="button">Path & Logs</button></li>
+  </ul>
+
+  <div class="tab-content">
+    <div class="tab-pane fade show active" id="tab-routes">
+      <div class="card mb-3">
+        <div class="card-body">
+          <div class="row g-2">
+            <div class="col-md-3"><input id="node" class="form-control" placeholder="Node / Leaf" disabled></div>
+            <div class="col-md-3"><input id="prefixOrIp" class="form-control" placeholder="Prefix / IP" disabled></div>
+            <div class="col-md-3"><input id="searchQ" class="form-control" placeholder="Recherche libre" disabled></div>
+            <div class="col-md-3"><select id="routeType" class="form-select" disabled><option value="">Route-Type</option><option value="bgp">bgp</option><option value="static">static</option><option value="connected">connected</option></select></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover table-sm align-middle mb-0">
+              <thead><tr><th>Pod</th><th>Prefix</th><th>Next-Hop</th><th>Gateway</th><th>Route-Type</th><th>Pref</th><th>VRF</th><th>Node</th></tr></thead>
+              <tbody id="routeRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-fabric">
+      <div class="card mb-3">
+        <div class="card-body small text-muted">Vue fabric en lecture seule. Les actions ports (activer/désactiver) sont disponibles en interface mais volontairement grisées.</div>
+      </div>
+      <div id="fabricContainer" class="vstack gap-3"></div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-vlans">
+      <div class="card">
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Pod</th><th>Tenant</th><th>Bridge Domain</th><th>VLAN</th><th>Encap</th><th>Subnet</th></tr></thead>
+              <tbody id="vlanRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-pathlogs">
+      <div class="card mb-3">
+        <div class="card-body">
+          <div class="row g-2 align-items-end">
+            <div class="col-md-3"><label class="form-label">Source IP</label><input id="srcIp" class="form-control" placeholder="10.10.10.10"></div>
+            <div class="col-md-3"><label class="form-label">Destination IP</label><input id="dstIp" class="form-control" placeholder="10.66.100.5"></div>
+            <div class="col-md-3 d-flex gap-2"><button id="btnTrace" class="btn btn-primary">Tracer</button><button id="btnEvents" class="btn btn-outline-secondary">Logs récents</button></div>
+            <div class="col-md-3"><span id="pathErr" class="text-danger"></span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header fw-semibold">Résolution & route</div>
+        <div class="card-body">
+          <div id="pathSummary" class="small text-muted mb-2">—</div>
+          <div class="table-responsive">
+            <table class="table table-sm"><thead><tr><th>Pod</th><th>Source</th><th>Destination</th><th>Best Route</th><th>Next-Hop</th><th>Type</th></tr></thead><tbody id="pathRows"></tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header fw-semibold">APIC Events</div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-sm"><thead><tr><th>Pod</th><th>Time</th><th>Sev</th><th>Code</th><th>Description</th></tr></thead><tbody id="eventRows"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const $ = (sel) => document.querySelector(sel);
+
+const CONNECT_URL = "{{ url_for('apic.connect_and_load') }}";
+const FABRIC_URL = "{{ url_for('apic.fabric') }}";
+const VLANS_URL = "{{ url_for('apic.vlans') }}";
+const PATHTRACE_URL = "{{ url_for('apic.pathtrace') }}";
+const EVENTS_URL = "{{ url_for('apic.events') }}";
+
+let ALL_ROUTES = [];
+
+function selectedPods() {
+  const sel = Array.from($("#pods").selectedOptions).map((o) => o.value);
+  return sel.length ? sel : ["POD-ANZ"];
+}
+
+function authContext() {
+  return {
+    pods: selectedPods(),
+    auth_mode: $("#authMode").value,
+    username: $("#username").value,
+    password: $("#password").value,
+  };
+}
+
+function routePill(type) {
+  const t = (type || "").toLowerCase();
+  if (t.includes("bgp")) return '<span class="pill pill-bgp">bgp</span>';
+  if (t.includes("static")) return '<span class="pill pill-static">static</span>';
+  if (t.includes("connect")) return '<span class="pill pill-connected">connected</span>';
+  return '<span class="pill bg-light text-muted border">?</span>';
+}
+
+function setConnected(connected) {
+  const badge = $("#connBadge");
+  badge.textContent = connected ? "Connected" : "Not connected";
+  badge.className = connected ? "badge bg-success" : "badge bg-secondary";
+  $("#btnReconnect").disabled = !connected;
+  ["#node", "#prefixOrIp", "#searchQ", "#routeType"].forEach((id) => { $(id).disabled = !connected; });
+}
+
+function renderRoutes(rows) {
+  const body = $("#routeRows");
+  body.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${r.pod || ""}</td><td class="mono">${r.prefix || ""}</td><td class="mono">${r.nh_addr || ""}</td><td>${r.gateway_name || ""}</td><td>${routePill(r.route_type)}</td><td>${r.pref || ""}</td><td class="mono">${r.vrf || ""}</td><td>${r.node || ""}</td>`;
+    body.appendChild(tr);
+  }
+  $("#rowCount").textContent = rows.length;
+  $("#uniqueCount").textContent = new Set(rows.map((r) => r.prefix || "")).size;
+}
+
+function filterRoutes() {
+  const q = $("#searchQ").value.trim().toLowerCase();
+  const node = $("#node").value.trim();
+  const pfx = $("#prefixOrIp").value.trim();
+  const routeType = $("#routeType").value.trim().toLowerCase();
+
+  let rows = ALL_ROUTES.slice();
+  if (node) rows = rows.filter((r) => (r.node || "") === node);
+  if (pfx) rows = rows.filter((r) => (r.prefix || "").includes(pfx) || (r.nh_addr || "").includes(pfx));
+  if (routeType) rows = rows.filter((r) => (r.route_type || "").toLowerCase().includes(routeType));
+  if (q) rows = rows.filter((r) => `${r.pod} ${r.prefix} ${r.nh_addr} ${r.gateway_name} ${r.route_type} ${r.vrf} ${r.node}`.toLowerCase().includes(q));
+
+  renderRoutes(rows);
+}
+
+function renderFabric(rows) {
+  const container = $("#fabricContainer");
+  container.innerHTML = "";
+  for (const podData of rows) {
+    const leafSections = (podData.leafs || []).map((leaf) => {
+      const portRows = (leaf.ports || []).map((p) => `
+        <tr>
+          <td class="mono">${p.id || ""}</td>
+          <td>${p.admin || ""}</td>
+          <td>${p.oper || ""}</td>
+          <td>${p.speed || ""}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-danger" disabled>Désactiver</button>
+            <button class="btn btn-sm btn-outline-success" disabled>Activer</button>
+          </td>
+        </tr>
+      `).join("");
+      return `
+        <details class="mb-2">
+          <summary><strong>${leaf.name || ""}</strong> (node ${leaf.node || ""}) — ${leaf.state || ""}</summary>
+          <div class="table-responsive mt-2">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Port</th><th>Admin</th><th>Oper</th><th>Speed</th><th>Action</th></tr></thead>
+              <tbody>${portRows || '<tr><td colspan="5" class="text-muted">Aucun port remonté.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </details>
+      `;
+    }).join("");
+
+    const spineRows = (podData.spines || []).map((s) =>
+      `<tr><td>${s.name || ""}</td><td>${s.node || ""}</td><td>${s.state || ""}</td><td>${s.ports_up || 0}/${s.ports_total || 0}</td></tr>`
+    ).join("");
+
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-body">
+        <h6>${podData.pod}</h6>
+        <div class="small text-muted mb-2">Leafs déroulables + résumé Spines</div>
+        ${leafSections || '<div class="text-muted small mb-2">Aucun leaf récupéré.</div>'}
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Spine</th><th>Node</th><th>État</th><th>Ports UP</th></tr></thead>
+            <tbody>${spineRows || '<tr><td colspan="4" class="text-muted">Aucun spine récupéré.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function renderVlans(rows) {
+  const body = $("#vlanRows");
+  body.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${r.pod || ""}</td><td>${r.tenant || ""}</td><td>${r.bd || ""}</td><td>${r.vlan || ""}</td><td>${r.encap || ""}</td><td class="mono">${r.subnet || ""}</td>`;
+    body.appendChild(tr);
+  }
+}
+
+async function loadRoutesFabricVlans() {
+  const errors = $("#errors");
+  errors.textContent = "";
+
+  const connectBody = { ...authContext(), vrf_dn_filter: $("#vrfDn").value || null };
+
+  const connectResp = await fetch(CONNECT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(connectBody),
+  });
+  const connectData = await connectResp.json();
+  if (!connectData.ok) {
+    setConnected(false);
+    errors.textContent = connectData.error || "Erreur connexion APIC";
+    return;
+  }
+
+  ALL_ROUTES = connectData.rows || [];
+  renderRoutes(ALL_ROUTES);
+  setConnected(true);
+
+  const fabricResp = await fetch(FABRIC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(authContext()),
+  });
+  const fabricData = await fabricResp.json();
+  renderFabric(fabricData.rows || []);
+
+  const vlanResp = await fetch(VLANS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(authContext()),
+  });
+  const vlanData = await vlanResp.json();
+  renderVlans(vlanData.rows || []);
+
+  const allErrors = [
+    ...(connectData.errors || []),
+    ...(fabricData.errors || []),
+    ...(vlanData.errors || []),
+  ];
+  if (allErrors.length) {
+    errors.innerHTML = allErrors.map((e) => `<div>⚠️ ${e}</div>`).join("");
+  }
+}
+
+async function runPathtrace() {
+  const body = {
+    ...authContext(),
+    vrf_dn: $("#vrfDn").value || null,
+    src_ip: $("#srcIp").value.trim(),
+    dst_ip: $("#dstIp").value.trim(),
+  };
+
+  const resp = await fetch(PATHTRACE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (!data.ok) {
+    $("#pathErr").textContent = data.error || "Erreur";
+    return;
+  }
+
+  const bodyEl = $("#pathRows");
+  bodyEl.innerHTML = "";
+
+  for (const r of data.results || []) {
+    const src = r.src || {};
+    const dst = r.dst || {};
+    const route = r.route || {};
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${r.pod || ""}</td>
+      <td><div class="mono">${src.ip || ""}</div><div class="small text-muted">${src.tenant || ""}${src.epg ? ' / ' + src.epg : ''}</div></td>
+      <td><div class="mono">${dst.ip || ""}</div><div class="small text-muted">${dst.tenant || ""}${dst.epg ? ' / ' + dst.epg : ''}</div></td>
+      <td><div class="mono">${route.prefix || ""}</div><div class="small text-muted">${route.vrf || ""}</div></td>
+      <td><div class="mono">${route.nh_addr || ""}</div><div class="small text-muted">${route.gateway_name || ""}</div></td>
+      <td>${routePill(route.route_type)}</td>
+    `;
+    bodyEl.appendChild(tr);
+  }
+
+  $("#pathSummary").textContent = `${(data.results || []).length} résultat(s) • erreurs: ${(data.errors || []).length}`;
+}
+
+async function loadEvents() {
+  const body = {
+    ...authContext(),
+    ip_filters: [$("#srcIp").value.trim(), $("#dstIp").value.trim()].filter(Boolean),
+    limit: 100,
+  };
+
+  const resp = await fetch(EVENTS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+
+  const bodyEl = $("#eventRows");
+  bodyEl.innerHTML = "";
+  for (const e of data.rows || []) {
+    const tr = document.createElement("tr");
+    const created = e.created ? new Date(e.created).toLocaleString() : "";
+    const desc = (e.descr || "").length > 120 ? `${e.descr.slice(0, 120)}…` : (e.descr || "");
+    tr.innerHTML = `<td>${e.pod || ""}</td><td class="text-nowrap">${created}</td><td>${e.severity || ""}</td><td>${e.code || ""}</td><td>${desc}</td>`;
+    bodyEl.appendChild(tr);
+  }
+}
+
+$("#btnConnect").addEventListener("click", async () => {
+  $("#btnConnect").disabled = true;
+  try {
+    await loadRoutesFabricVlans();
+  } catch (_e) {
+    $("#errors").textContent = "Erreur de connexion APIC.";
+    setConnected(false);
+  } finally {
+    $("#btnConnect").disabled = false;
+  }
+});
+
+$("#btnReconnect").addEventListener("click", () => $("#btnConnect").click());
+$("#btnTrace").addEventListener("click", runPathtrace);
+$("#btnEvents").addEventListener("click", loadEvents);
+
+["#node", "#prefixOrIp", "#searchQ", "#routeType"].forEach((id) => {
+  $(id).addEventListener("input", filterRoutes);
+  $(id).addEventListener("change", filterRoutes);
+});
+
+if ($("#pods").options.length) {
+  $("#pods").options[0].selected = true;
+}
+setConnected(false);
+</script>
+</body>
+</html>
